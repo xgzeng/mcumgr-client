@@ -17,7 +17,7 @@ pub fn reset(specs: &SerialSpecs) -> Result<(), Error> {
     let mut port = SerialTransport::new(specs)?;
 
     // send request
-    let body = Vec::new();
+    let body = Vec::<u8>::new();
     let (request_header, response_header, response_body) =
         port.transceive(NmpOp::Write, NmpGroup::Default, NmpIdDef::Reset, &body)?;
 

@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use serde::ser;
 use std::fmt;
 
 use crate::nmp_hdr::*;
@@ -19,13 +20,15 @@ impl fmt::Display for TransportError {
 }
 
 pub trait NmpTransport {
-    fn transceive(
+    fn transceive<T>(
         &mut self,
         op: NmpOp,
         group: NmpGroup,
         id: impl NmpId,
-        body: &Vec<u8>,
-    ) -> Result<(NmpHdr, NmpHdr, serde_cbor::Value)>;
+        body: &T,
+    ) -> Result<(NmpHdr, NmpHdr, serde_cbor::Value)>
+    where
+        T: ser::Serialize;
 }
 
 pub struct SerialTransport {
@@ -48,15 +51,20 @@ impl SerialTransport {
 }
 
 impl NmpTransport for SerialTransport {
-    fn transceive(
+    fn transceive<T>(
         &mut self,
         op: NmpOp,
         group: NmpGroup,
         id: impl NmpId,
-        body: &Vec<u8>,
-    ) -> Result<(NmpHdr, NmpHdr, serde_cbor::Value)> {
+        req: &T,
+    ) -> Result<(NmpHdr, NmpHdr, serde_cbor::Value)>
+    where
+        T: ser::Serialize,
+    {
+        // convert to bytes with CBOR
+        let req_body = serde_cbor::to_vec(req)?;
         let (data, request_header) =
-            encode_request(self.linelength, op, group, id, body, self.seq_id)?;
+            encode_request(self.linelength, op, group, id, &req_body, self.seq_id)?;
         if data.len() > self.mtu {
             let reduce = data.len() - self.mtu;
             return Err(anyhow!(TransportError::TooLargeChunk(reduce)));

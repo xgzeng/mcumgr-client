@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use crate::nmp_hdr::*;
 use crate::transfer::SerialSpecs;
-use crate::transport::{TransportError, NmpTransport, SerialTransport};
+use crate::transport::{NmpTransport, SerialTransport, TransportError};
 
 fn get_rc(response_body: &serde_cbor::Value) -> Option<u32> {
     let mut rc: Option<u32> = None;
@@ -61,10 +61,9 @@ pub fn erase(specs: &SerialSpecs, slot: Option<u32>) -> Result<(), Error> {
     let mut port = SerialTransport::new(specs)?;
 
     let req = ImageEraseReq { slot: slot };
-    let body = serde_cbor::to_vec(&req)?;
     // send request
     let (request_header, response_header, response_body) =
-        port.transceive(NmpOp::Write, NmpGroup::Image, NmpIdImage::Erase, &body)?;
+        port.transceive(NmpOp::Write, NmpGroup::Image, NmpIdImage::Erase, &req)?;
 
     if !check_answer(&request_header, &response_header) {
         bail!("wrong answer types")
@@ -90,10 +89,9 @@ pub fn test(specs: &SerialSpecs, hash: Vec<u8>, confirm: Option<bool>) -> Result
         hash: hash,
         confirm: confirm,
     };
-    let body = serde_cbor::to_vec(&req)?;
     // send request
     let (request_header, response_header, response_body) =
-        port.transceive(NmpOp::Write, NmpGroup::Image, NmpIdImage::State, &body)?;
+        port.transceive(NmpOp::Write, NmpGroup::Image, NmpIdImage::State, &req)?;
 
     if !check_answer(&request_header, &response_header) {
         bail!("wrong answer types")
@@ -116,11 +114,10 @@ pub fn list(specs: &SerialSpecs) -> Result<ImageStateRsp, Error> {
     let mut transport = SerialTransport::new(specs)?;
 
     // send request
-    let body: Vec<u8> =
-        serde_cbor::to_vec(&std::collections::BTreeMap::<String, String>::new()).unwrap();
+    let req = std::collections::BTreeMap::<String, String>::new();
 
     let (request_header, response_header, response_body) =
-        transport.transceive(NmpOp::Read, NmpGroup::Image, NmpIdImage::State, &body)?;
+        transport.transceive(NmpOp::Read, NmpGroup::Image, NmpIdImage::State, &req)?;
 
     if !check_answer(&request_header, &response_header) {
         bail!("wrong answer types")
@@ -203,13 +200,10 @@ where
             };
             debug!("req: {:?}", req);
 
-            // convert to bytes with CBOR
-            let body = serde_cbor::to_vec(&req)?;
-
             // send request
             sent_blocks += 1;
             let (request_header, response_header, response_body) =
-                match port.transceive(NmpOp::Write, NmpGroup::Image, NmpIdImage::Upload, &body) {
+                match port.transceive(NmpOp::Write, NmpGroup::Image, NmpIdImage::Upload, &req) {
                     Ok(ret) => ret,
                     Err(e) if e.to_string() == "Operation timed out" => {
                         if nb_retry == 0 {
@@ -237,7 +231,6 @@ where
                         }
                     }
                     Err(e) => {
-                        error!("transceive error: {}", e);
                         return Err(e);
                     }
                 };
