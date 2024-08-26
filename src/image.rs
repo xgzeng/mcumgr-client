@@ -12,11 +12,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::nmp_hdr::*;
-use crate::transfer::encode_request;
-use crate::transfer::next_seq_id;
-use crate::transfer::open_port;
-use crate::transfer::transceive;
 use crate::transfer::SerialSpecs;
+use crate::transport::{TransportError, NmpTransport, SerialTransport};
 
 fn get_rc(response_body: &serde_cbor::Value) -> Option<u32> {
     let mut rc: Option<u32> = None;
@@ -61,20 +58,13 @@ pub fn erase(specs: &SerialSpecs, slot: Option<u32>) -> Result<(), Error> {
     info!("erase request");
 
     // open serial port
-    let mut port = open_port(specs)?;
+    let mut port = SerialTransport::new(specs)?;
 
     let req = ImageEraseReq { slot: slot };
     let body = serde_cbor::to_vec(&req)?;
     // send request
-    let (data, request_header) = encode_request(
-        specs.linelength,
-        NmpOp::Write,
-        NmpGroup::Image,
-        NmpIdImage::Erase,
-        &body,
-        next_seq_id(),
-    )?;
-    let (response_header, response_body) = transceive(&mut *port, &data)?;
+    let (request_header, response_header, response_body) =
+        port.transceive(NmpOp::Write, NmpGroup::Image, NmpIdImage::Erase, &body)?;
 
     if !check_answer(&request_header, &response_header) {
         bail!("wrong answer types")
@@ -94,7 +84,7 @@ pub fn test(specs: &SerialSpecs, hash: Vec<u8>, confirm: Option<bool>) -> Result
     info!("set image pending request");
 
     // open serial port
-    let mut port = open_port(specs)?;
+    let mut port = SerialTransport::new(specs)?;
 
     let req = ImageStateReq {
         hash: hash,
@@ -102,15 +92,8 @@ pub fn test(specs: &SerialSpecs, hash: Vec<u8>, confirm: Option<bool>) -> Result
     };
     let body = serde_cbor::to_vec(&req)?;
     // send request
-    let (data, request_header) = encode_request(
-        specs.linelength,
-        NmpOp::Write,
-        NmpGroup::Image,
-        NmpIdImage::State,
-        &body,
-        next_seq_id(),
-    )?;
-    let (response_header, response_body) = transceive(&mut *port, &data)?;
+    let (request_header, response_header, response_body) =
+        port.transceive(NmpOp::Write, NmpGroup::Image, NmpIdImage::State, &body)?;
 
     if !check_answer(&request_header, &response_header) {
         bail!("wrong answer types")
@@ -130,20 +113,14 @@ pub fn list(specs: &SerialSpecs) -> Result<ImageStateRsp, Error> {
     info!("send image list request");
 
     // open serial port
-    let mut port = open_port(specs)?;
+    let mut transport = SerialTransport::new(specs)?;
 
     // send request
     let body: Vec<u8> =
         serde_cbor::to_vec(&std::collections::BTreeMap::<String, String>::new()).unwrap();
-    let (data, request_header) = encode_request(
-        specs.linelength,
-        NmpOp::Read,
-        NmpGroup::Image,
-        NmpIdImage::State,
-        &body,
-        next_seq_id(),
-    )?;
-    let (response_header, response_body) = transceive(&mut *port, &data)?;
+
+    let (request_header, response_header, response_body) =
+        transport.transceive(NmpOp::Read, NmpGroup::Image, NmpIdImage::State, &body)?;
 
     if !check_answer(&request_header, &response_header) {
         bail!("wrong answer types")
@@ -179,7 +156,7 @@ where
     info!("flashing to slot {}", slot);
 
     // open serial port
-    let mut port = open_port(specs)?;
+    let mut port = SerialTransport::new(specs)?;
 
     // load file
     let data = read(filename)?;
@@ -195,7 +172,6 @@ where
         let off_start = off;
         let mut try_length = specs.mtu;
         debug!("try_length: {}", try_length);
-        let seq_id = next_seq_id();
         loop {
             // get slot
             let image_num = slot;
@@ -229,43 +205,42 @@ where
 
             // convert to bytes with CBOR
             let body = serde_cbor::to_vec(&req)?;
-            let (chunk, request_header) = encode_request(
-                specs.linelength,
-                NmpOp::Write,
-                NmpGroup::Image,
-                NmpIdImage::Upload,
-                &body,
-                seq_id,
-            )?;
-
-            // test if too long
-            if chunk.len() > specs.mtu {
-                let reduce = chunk.len() - specs.mtu;
-                if reduce > try_length {
-                    bail!("MTU too small");
-                }
-
-                // number of bytes to reduce is base64 encoded, calculate back the number of bytes
-                // and then reduce a bit more for base64 filling and rounding
-                try_length -= reduce * 3 / 4 + 3;
-                debug!("new try_length: {}", try_length);
-                continue;
-            }
 
             // send request
             sent_blocks += 1;
-            let (response_header, response_body) = match transceive(&mut *port, &chunk) {
-                Ok(ret) => ret,
-                Err(e) if e.to_string() == "Operation timed out" => {
-                    if nb_retry == 0 {
+            let (request_header, response_header, response_body) =
+                match port.transceive(NmpOp::Write, NmpGroup::Image, NmpIdImage::Upload, &body) {
+                    Ok(ret) => ret,
+                    Err(e) if e.to_string() == "Operation timed out" => {
+                        if nb_retry == 0 {
+                            return Err(e);
+                        }
+                        nb_retry -= 1;
+                        sent_blocks -= 1;
+                        debug!("missed answer, nb_retry: {}", nb_retry);
+                        continue;
+                    }
+                    Err(e) if e.is::<TransportError>() => {
+                        match e.downcast::<TransportError>().unwrap() {
+                            TransportError::TooLargeChunk(reduce) => {
+                                if reduce > try_length {
+                                    bail!("MTU too small");
+                                }
+
+                                // number of bytes to reduce is base64 encoded, calculate back the number of bytes
+                                // and then reduce a bit more for base64 filling and rounding
+                                try_length -= reduce * 3 / 4 + 3;
+                                debug!("new try_length: {}", try_length);
+                                sent_blocks -= 1;
+                                continue;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("transceive error: {}", e);
                         return Err(e);
                     }
-                    nb_retry -= 1;
-                    debug!("missed answer, nb_retry: {}", nb_retry);
-                    continue;
-                }
-                Err(e) => return Err(e),
-            };
+                };
 
             if !check_answer(&request_header, &response_header) {
                 bail!("wrong answer types")
@@ -315,7 +290,7 @@ where
 
         // The first packet was sent and the device has cleared its internal flash
         // We can now lower the timeout in case of failed transmission
-        port.set_timeout(Duration::from_millis(specs.subsequent_timeout_ms as u64))?;
+        // port.set_timeout(Duration::from_millis(specs.subsequent_timeout_ms as u64))?;
     }
 
     let elapsed = start_time.elapsed().as_secs_f64().round();

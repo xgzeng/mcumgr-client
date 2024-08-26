@@ -7,30 +7,20 @@ use serde_cbor;
 use serde_json;
 
 use crate::nmp_hdr::*;
-use crate::transfer::encode_request;
-use crate::transfer::next_seq_id;
-use crate::transfer::open_port;
-use crate::transfer::transceive;
 use crate::transfer::SerialSpecs;
+use crate::transport::{NmpTransport, SerialTransport};
 
 pub fn reset(specs: &SerialSpecs) -> Result<(), Error> {
     info!("send reset request");
 
     // open serial port
-    let mut port = open_port(specs)?;
+    let mut port = SerialTransport::new(specs)?;
 
     // send request
     let body = Vec::new();
-    let (data, request_header) = encode_request(
-        specs.linelength,
-        NmpOp::Write,
-        NmpGroup::Default,
-        NmpIdDef::Reset,
-        &body,
-        next_seq_id(),
-    )?;
-    let (response_header, response_body) = transceive(&mut *port, &data)?;
-    
+    let (request_header, response_header, response_body) =
+        port.transceive(NmpOp::Write, NmpGroup::Default, NmpIdDef::Reset, &body)?;
+
     // verify sequence id
     if response_header.seq != request_header.seq {
         bail!("wrong sequence number");
