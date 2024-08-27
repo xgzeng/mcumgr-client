@@ -25,10 +25,24 @@ pub trait NmpTransport {
         op: NmpOp,
         group: NmpGroup,
         id: impl NmpId,
-        body: &T,
+        req: &T,
     ) -> Result<(NmpHdr, NmpHdr, serde_cbor::Value)>
     where
-        T: ser::Serialize;
+        T: ser::Serialize,
+    {
+        // convert to bytes with CBOR
+        let req_body = serde_cbor::to_vec(req)?;
+        self.transceive_raw(op, group, id, &req_body)
+    }
+
+    // @body cbor encoded message
+    fn transceive_raw(
+        &mut self,
+        op: NmpOp,
+        group: NmpGroup,
+        id: impl NmpId,
+        body: &Vec<u8>,
+    ) -> Result<(NmpHdr, NmpHdr, serde_cbor::Value)>;
 }
 
 pub struct SerialTransport {
@@ -51,28 +65,24 @@ impl SerialTransport {
 }
 
 impl NmpTransport for SerialTransport {
-    fn transceive<T>(
+    fn transceive_raw(
         &mut self,
         op: NmpOp,
         group: NmpGroup,
         id: impl NmpId,
-        req: &T,
-    ) -> Result<(NmpHdr, NmpHdr, serde_cbor::Value)>
-    where
-        T: ser::Serialize,
-    {
-        // convert to bytes with CBOR
-        let req_body = serde_cbor::to_vec(req)?;
-        let (data, request_header) =
-            encode_request(self.linelength, op, group, id, &req_body, self.seq_id)?;
-        if data.len() > self.mtu {
-            let reduce = data.len() - self.mtu;
+        body: &Vec<u8>,
+    ) -> Result<(NmpHdr, NmpHdr, serde_cbor::Value)> {
+        let (frame, request_header) =
+            encode_request(self.linelength, op, group, id, &body, self.seq_id)?;
+
+        if frame.len() > self.mtu {
+            let reduce = frame.len() - self.mtu;
             return Err(anyhow!(TransportError::TooLargeChunk(reduce)));
         }
 
         self.seq_id = self.seq_id.wrapping_add(1);
-        let (response_header, response_body) = transceive(&mut *self.port, &data)?;
 
+        let (response_header, response_body) = transceive(&mut *self.port, &frame)?;
         Ok((request_header, response_header, response_body))
     }
 }
