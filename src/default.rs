@@ -8,18 +8,23 @@ use serde_json;
 
 use crate::nmp_hdr::*;
 use crate::transfer::SerialSpecs;
-use crate::transport::{NmpTransport, SerialTransport};
+use crate::transport::{open_transport, transceive};
 
 pub fn reset(specs: &SerialSpecs) -> Result<(), Error> {
     info!("send reset request");
 
     // open serial port
-    let mut port = SerialTransport::new(specs)?;
+    let mut transport = open_transport(specs)?;
 
     // send request
     let body = Vec::<u8>::new();
-    let (request_header, response_header, response_body) =
-        port.transceive(NmpOp::Write, NmpGroup::Default, NmpIdDef::Reset, &body)?;
+    let (request_header, response_header, response_body) = transceive(
+        transport.as_mut(),
+        NmpOp::Write,
+        NmpGroup::Default,
+        NmpIdDef::Reset,
+        &body,
+    )?;
 
     // verify sequence id
     if response_header.seq != request_header.seq {

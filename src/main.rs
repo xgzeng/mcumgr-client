@@ -91,6 +91,9 @@ enum Commands {
         #[arg(short, long)]
         slot: Option<u32>,
     },
+
+    /// scan and list bluetooth devices
+    Btscan,
 }
 
 fn main() {
@@ -191,7 +194,7 @@ fn main() {
             // create a progress bar
             let pb = ProgressBar::new(1 as u64);
             pb.set_style(ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+            .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes_per_sec} {bytes}/{total_bytes} ({eta})")
             .unwrap().progress_chars("=> "));
 
             upload(
@@ -213,10 +216,11 @@ fn main() {
                 }),
             )
         }(),
-        Commands::Test { hash, confirm } => || -> Result<(), Error> { 
-            test(&specs, hex::decode(hash)?, *confirm)
-        }(),
+        Commands::Test { hash, confirm } => {
+            || -> Result<(), Error> { test(&specs, hex::decode(hash)?, *confirm) }()
+        }
         Commands::Erase { slot } => erase(&specs, *slot),
+        Commands::Btscan => bt_scan(),
     };
 
     // show error, if failed

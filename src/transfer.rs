@@ -117,7 +117,7 @@ pub fn encode_request(
     Ok((data, request_header))
 }
 
-pub fn transceive(
+pub fn serial_transceive(
     port: &mut dyn SerialPort,
     data: &Vec<u8>,
 ) -> Result<(NmpHdr, serde_cbor::Value), Error> {

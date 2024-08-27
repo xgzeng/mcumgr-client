@@ -4,6 +4,7 @@ use std::fmt;
 
 use crate::nmp_hdr::*;
 use crate::transfer::*;
+use crate::transport_ble::BluetoothTransport;
 
 // Transport Error
 #[derive(Debug)]
@@ -20,32 +21,31 @@ impl fmt::Display for TransportError {
 }
 
 pub trait NmpTransport {
-    fn transceive<T>(
-        &mut self,
-        op: NmpOp,
-        group: NmpGroup,
-        id: impl NmpId,
-        req: &T,
-    ) -> Result<(NmpHdr, NmpHdr, serde_cbor::Value)>
-    where
-        T: ser::Serialize,
-    {
-        // convert to bytes with CBOR
-        let req_body = serde_cbor::to_vec(req)?;
-        self.transceive_raw(op, group, id, &req_body)
-    }
-
     // @body cbor encoded message
-    fn transceive_raw(
+    fn transceive(
         &mut self,
         op: NmpOp,
         group: NmpGroup,
-        id: impl NmpId,
-        body: &Vec<u8>,
+        id: u8,
+        body_cbor: &Vec<u8>,
     ) -> Result<(NmpHdr, NmpHdr, serde_cbor::Value)>;
+
+    fn mtu(&self) -> usize;
 }
 
-pub struct SerialTransport {
+pub fn transceive(
+    transport: &mut dyn NmpTransport,
+    op: NmpOp,
+    group: NmpGroup,
+    id: impl NmpId,
+    req: &impl ser::Serialize,
+) -> Result<(NmpHdr, NmpHdr, serde_cbor::Value)> {
+    // convert to bytes with CBOR
+    let body_cbor = serde_cbor::to_vec(req)?;
+    transport.transceive(op, group, id.to_u8(), &body_cbor)
+}
+
+struct SerialTransport {
     port: Box<dyn serialport::SerialPort>,
     linelength: usize,
     mtu: usize,
@@ -64,14 +64,25 @@ impl SerialTransport {
     }
 }
 
+impl NmpId for u8 {
+    fn to_u8(&self) -> u8 {
+        *self
+    }
+}
+
 impl NmpTransport for SerialTransport {
-    fn transceive_raw(
+    fn mtu(&self) -> usize {
+        self.mtu * 3 / 4
+    }
+
+    fn transceive(
         &mut self,
         op: NmpOp,
         group: NmpGroup,
-        id: impl NmpId,
+        id: u8,
         body: &Vec<u8>,
     ) -> Result<(NmpHdr, NmpHdr, serde_cbor::Value)> {
+        // encode into serial frame
         let (frame, request_header) =
             encode_request(self.linelength, op, group, id, &body, self.seq_id)?;
 
@@ -82,7 +93,17 @@ impl NmpTransport for SerialTransport {
 
         self.seq_id = self.seq_id.wrapping_add(1);
 
-        let (response_header, response_body) = transceive(&mut *self.port, &frame)?;
+        let (response_header, response_body) = serial_transceive(&mut *self.port, &frame)?;
         Ok((request_header, response_header, response_body))
     }
+}
+
+pub fn open_transport(specs: &SerialSpecs) -> Result<Box<dyn NmpTransport>> {
+    let transport: Box<dyn NmpTransport> = if specs.device.starts_with("bt:") {
+        let id = specs.device[3..].to_string();
+        Box::new(BluetoothTransport::open(&id)?)
+    } else {
+        Box::new(SerialTransport::new(specs)?)
+    };
+    Ok(transport)
 }
