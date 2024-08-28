@@ -12,8 +12,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::nmp_hdr::*;
-use crate::transfer::SerialSpecs;
-use crate::transport::{open_transport, transceive, TransportError};
+use crate::transport::{transceive, NmpTransport, TransportError};
 
 fn get_rc(response_body: &serde_cbor::Value) -> Option<u32> {
     let mut rc: Option<u32> = None;
@@ -54,16 +53,13 @@ fn check_answer(request_header: &NmpHdr, response_header: &NmpHdr) -> bool {
     true
 }
 
-pub fn erase(specs: &SerialSpecs, slot: Option<u32>) -> Result<(), Error> {
+pub fn erase(transport: &mut dyn NmpTransport, slot: Option<u32>) -> Result<(), Error> {
     info!("erase request");
-
-    // open serial port
-    let mut transport = open_transport(specs)?;
 
     let req = ImageEraseReq { slot: slot };
     // send request
     let (request_header, response_header, response_body) = transceive(
-        transport.as_mut(),
+        transport,
         NmpOp::Write,
         NmpGroup::Image,
         NmpIdImage::Erase,
@@ -84,11 +80,12 @@ pub fn erase(specs: &SerialSpecs, slot: Option<u32>) -> Result<(), Error> {
     Ok(())
 }
 
-pub fn test(specs: &SerialSpecs, hash: Vec<u8>, confirm: Option<bool>) -> Result<(), Error> {
+pub fn test(
+    transport: &mut dyn NmpTransport,
+    hash: Vec<u8>,
+    confirm: Option<bool>,
+) -> Result<(), Error> {
     info!("set image pending request");
-
-    // open serial port
-    let mut transport = open_transport(specs)?;
 
     let req = ImageStateReq {
         hash: hash,
@@ -96,7 +93,7 @@ pub fn test(specs: &SerialSpecs, hash: Vec<u8>, confirm: Option<bool>) -> Result
     };
     // send request
     let (request_header, response_header, response_body) = transceive(
-        transport.as_mut(),
+        transport,
         NmpOp::Write,
         NmpGroup::Image,
         NmpIdImage::State,
@@ -117,17 +114,14 @@ pub fn test(specs: &SerialSpecs, hash: Vec<u8>, confirm: Option<bool>) -> Result
     Ok(())
 }
 
-pub fn list(specs: &SerialSpecs) -> Result<ImageStateRsp, Error> {
+pub fn list(transport: &mut dyn NmpTransport) -> Result<ImageStateRsp, Error> {
     info!("send image list request");
-
-    // open serial port
-    let mut transport = open_transport(specs)?;
 
     // send request
     let req = std::collections::BTreeMap::<String, String>::new();
 
     let (request_header, response_header, response_body) = transceive(
-        transport.as_mut(),
+        transport,
         NmpOp::Read,
         NmpGroup::Image,
         NmpIdImage::State,
@@ -145,9 +139,10 @@ pub fn list(specs: &SerialSpecs) -> Result<ImageStateRsp, Error> {
 }
 
 pub fn upload<F>(
-    specs: &SerialSpecs,
+    transport: &mut dyn NmpTransport,
     filename: &PathBuf,
     slot: u8,
+    timeout: (Duration, Duration), // initial and subsequent timeout
     mut progress: Option<F>,
 ) -> Result<(), Error>
 where
@@ -167,9 +162,6 @@ where
     }
     info!("flashing to slot {}", slot);
 
-    // open serial port
-    let mut transport = open_transport(specs)?;
-
     // load file
     let data = read(filename)?;
     info!("{} bytes to transfer", data.len());
@@ -179,8 +171,9 @@ where
     let start_time = Instant::now();
     let mut sent_blocks: u32 = 0;
     let mut confirmed_blocks: u32 = 0;
+    transport.set_timeout(timeout.0)?;
     loop {
-        let mut nb_retry = specs.nb_retry;
+        let mut nb_retry = 4; // specs.nb_retry;
         let off_start = off;
         let mut try_length = transport.mtu();
         debug!("try_length: {}", try_length);
@@ -218,7 +211,7 @@ where
             // send request
             sent_blocks += 1;
             let (request_header, response_header, response_body) = match transceive(
-                transport.as_mut(),
+                transport,
                 NmpOp::Write,
                 NmpGroup::Image,
                 NmpIdImage::Upload,
@@ -237,13 +230,11 @@ where
                 Err(e) if e.is::<TransportError>() => {
                     match e.downcast::<TransportError>().unwrap() {
                         TransportError::TooLargeChunk(reduce) => {
-                            if reduce > try_length {
+                            if reduce >= try_length {
                                 bail!("MTU too small");
                             }
 
-                            // number of bytes to reduce is base64 encoded, calculate back the number of bytes
-                            // and then reduce a bit more for base64 filling and rounding
-                            try_length -= reduce * 3 / 4 + 3;
+                            try_length -= reduce;
                             debug!("new try_length: {}", try_length);
                             sent_blocks -= 1;
                             continue;
@@ -303,7 +294,7 @@ where
 
         // The first packet was sent and the device has cleared its internal flash
         // We can now lower the timeout in case of failed transmission
-        // port.set_timeout(Duration::from_millis(specs.subsequent_timeout_ms as u64))?;
+        transport.set_timeout(timeout.1)?;
     }
 
     let elapsed = start_time.elapsed().as_secs_f64().round();

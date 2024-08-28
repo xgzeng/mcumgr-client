@@ -47,6 +47,14 @@ struct Cli {
     #[arg(short, long, default_value_t = 115_200)]
     baudrate: u32,
 
+    /// verbose mode
+    #[arg(long, default_value_t = false)]
+    bt: bool,
+
+    /// maximum size of ble characteristic
+    #[arg(short, long, default_value_t = 128)]
+    chrc_mtu: usize,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -61,6 +69,16 @@ impl From<&Cli> for SerialSpecs {
             linelength: cli.linelength,
             mtu: cli.mtu,
             baudrate: cli.baudrate,
+        }
+    }
+}
+
+impl From<&Cli> for BluetoothSpecs {
+    fn from(cli: &Cli) -> BluetoothSpecs {
+        BluetoothSpecs {
+            device: cli.device.clone(),
+            mtu: cli.mtu,
+            chrc_mtu: cli.chrc_mtu,
         }
     }
 }
@@ -96,6 +114,17 @@ enum Commands {
     Btscan,
 }
 
+fn open_transport(cli: &Cli) -> Result<Box<dyn NmpTransport>> {
+    if cli.bt {
+        // use bluetooth transport
+        let specs = BluetoothSpecs::from(cli);
+        Ok(Box::new(BluetoothTransport::new(&specs)?))
+    } else {
+        let specs = SerialSpecs::from(cli);
+        Ok(Box::new(SerialTransport::new(&specs)?))
+    }
+}
+
 fn main() {
     // show program name, version and copyright
     let name = env!("CARGO_PKG_NAME");
@@ -122,6 +151,11 @@ fn main() {
 
     // if no device is specified, try to auto detect it
     if cli.device.is_empty() {
+        if cli.bt {
+            println!("device must be specified for bluetooth transport");
+            return;
+        }
+
         let mut bootloaders = Vec::new();
         match available_ports() {
             Ok(ports) => {
@@ -180,16 +214,27 @@ fn main() {
         }
     }
 
-    let specs = SerialSpecs::from(&cli);
+    if cli.bt {
+        // default value(200) is not enough for bluetooth
+        cli.subsequent_timeout_ms = std::cmp::max(cli.subsequent_timeout_ms, 1000);
+    }
+
+    let mut transport = match open_transport(&cli) {
+        Ok(t) => t,
+        Err(e) => {
+            error!("Error opening transport: {}", e);
+            process::exit(1);
+        }
+    };
 
     // execute command
     let result = match &cli.command {
         Commands::List => || -> Result<(), Error> {
-            let v = list(&specs)?;
+            let v = list(transport.as_mut())?;
             print!("response: {}", serde_json::to_string_pretty(&v)?);
             Ok(())
         }(),
-        Commands::Reset => reset(&specs),
+        Commands::Reset => reset(transport.as_mut()),
         Commands::Upload { filename, slot } => || -> Result<(), Error> {
             // create a progress bar
             let pb = ProgressBar::new(1 as u64);
@@ -197,10 +242,16 @@ fn main() {
             .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes_per_sec} {bytes}/{total_bytes} ({eta})")
             .unwrap().progress_chars("=> "));
 
+            let timeout_setting = (
+                std::time::Duration::from_secs(cli.initial_timeout_s as u64),
+                std::time::Duration::from_millis(cli.subsequent_timeout_ms as u64),
+            );
+
             upload(
-                &specs,
+                transport.as_mut(),
                 filename,
                 *slot,
+                timeout_setting,
                 Some(|offset, total| {
                     if let Some(l) = pb.length() {
                         if l != total {
@@ -217,9 +268,9 @@ fn main() {
             )
         }(),
         Commands::Test { hash, confirm } => {
-            || -> Result<(), Error> { test(&specs, hex::decode(hash)?, *confirm) }()
+            || -> Result<(), Error> { test(transport.as_mut(), hex::decode(hash)?, *confirm) }()
         }
-        Commands::Erase { slot } => erase(&specs, *slot),
+        Commands::Erase { slot } => erase(transport.as_mut(), *slot),
         Commands::Btscan => bt_scan(),
     };
 

@@ -26,7 +26,8 @@ const NMP_TRANSPORT_CHRC: &Characteristic = &Characteristic {
     descriptors: BTreeSet::<Descriptor>::new(),
 };
 
-struct BluetoothSpec {
+pub struct BluetoothSpecs {
+    // device id or name
     pub device: String,
     // mtu can be bigger than chrc_mtu if device support assembly
     pub mtu: usize,
@@ -44,6 +45,7 @@ pub struct BluetoothTransport {
     chrc_mtu: usize,
     seq_id: u8,
     notification_stream: NotificationStream,
+    timeout: Duration,
 }
 
 async fn open_adapter() -> Result<Adapter> {
@@ -142,30 +144,23 @@ impl BluetoothTransport {
         Ok((peripheral, notification_stream))
     }
 
-    pub fn open(id_or_name: &str) -> Result<BluetoothTransport> {
+    pub fn new(specs: &BluetoothSpecs) -> Result<BluetoothTransport> {
         let runtime = Runtime::new()?;
         let (peripheral, notification_stream) = runtime
-            .block_on(Self::open_async(id_or_name))
+            .block_on(Self::open_async(&specs.device))
             .context("open ble peripheral")?;
 
         let transport = BluetoothTransport {
             runtime,
             peripheral,
-            mtu: 2048,
-            chrc_mtu: 480,
+            mtu: specs.mtu,
+            chrc_mtu: specs.chrc_mtu,
             seq_id: rand::random::<u8>(),
             notification_stream,
+            timeout: Duration::from_secs(1),
         };
         Ok(transport)
     }
-
-    // pub fn new(peripheral: Peripheral) -> Result<BluetoothTransport> {
-    //     Ok(BluetoothTransport {
-    //         peripheral,
-    //         mtu: 200,
-    //         seq_id: rand::random::<u8>(),
-    //     })
-    // }
 }
 
 async fn write_request(peripheral: &Peripheral, data: &Vec<u8>, chrc_mtu: usize) -> Result<()> {
@@ -180,16 +175,16 @@ async fn write_request(peripheral: &Peripheral, data: &Vec<u8>, chrc_mtu: usize)
 
 const NMP_HDR_LEN: usize = 8;
 
-async fn read_response(notification_stream: &mut NotificationStream) -> Result<Vec<u8>> {
+async fn read_response(
+    notification_stream: &mut NotificationStream,
+    timeout: Duration,
+) -> Result<Vec<u8>> {
     let mut response: Vec<u8> = vec![];
     // wait for notifitcations
     loop {
-        let notification = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            notification_stream.next(),
-        )
-        .await
-        .context("timeout waiting for response")?;
+        let notification = tokio::time::timeout(timeout, notification_stream.next())
+            .await
+            .context(format!("timeout({:?}) waiting for response", timeout))?;
 
         let notification = notification.ok_or_else(|| anyhow!("no response"))?;
         response.extend(notification.value);
@@ -211,6 +206,11 @@ async fn read_response(notification_stream: &mut NotificationStream) -> Result<V
 impl NmpTransport for BluetoothTransport {
     fn mtu(&self) -> usize {
         self.mtu
+    }
+
+    fn set_timeout(&mut self, timeout: std::time::Duration) -> Result<()> {
+        self.timeout = timeout;
+        Ok(())
     }
 
     fn transceive(
@@ -235,7 +235,7 @@ impl NmpTransport for BluetoothTransport {
 
         let rsp = self.runtime.block_on(async {
             write_request(&self.peripheral, &frame, self.chrc_mtu).await?;
-            read_response(&mut self.notification_stream).await
+            read_response(&mut self.notification_stream, self.timeout).await
         })?;
 
         // parse header

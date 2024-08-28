@@ -4,7 +4,6 @@ use std::fmt;
 
 use crate::nmp_hdr::*;
 use crate::transfer::*;
-use crate::transport_ble::BluetoothTransport;
 
 // Transport Error
 #[derive(Debug)]
@@ -31,6 +30,8 @@ pub trait NmpTransport {
     ) -> Result<(NmpHdr, NmpHdr, serde_cbor::Value)>;
 
     fn mtu(&self) -> usize;
+
+    fn set_timeout(&mut self, timeout: std::time::Duration) -> Result<()>;
 }
 
 pub fn transceive(
@@ -45,7 +46,7 @@ pub fn transceive(
     transport.transceive(op, group, id.to_u8(), &body_cbor)
 }
 
-struct SerialTransport {
+pub struct SerialTransport {
     port: Box<dyn serialport::SerialPort>,
     linelength: usize,
     mtu: usize,
@@ -75,6 +76,11 @@ impl NmpTransport for SerialTransport {
         self.mtu * 3 / 4
     }
 
+    fn set_timeout(&mut self, timeout: std::time::Duration) -> Result<()> {
+        self.port.set_timeout(timeout)?;
+        Ok(())
+    }
+
     fn transceive(
         &mut self,
         op: NmpOp,
@@ -87,7 +93,9 @@ impl NmpTransport for SerialTransport {
             encode_request(self.linelength, op, group, id, &body, self.seq_id)?;
 
         if frame.len() > self.mtu {
-            let reduce = frame.len() - self.mtu;
+            // number of bytes to reduce is base64 encoded, calculate back the number of bytes
+            // and then reduce a bit more for base64 filling and rounding
+            let reduce = (frame.len() - self.mtu) * 3 / 4 + 3;
             return Err(anyhow!(TransportError::TooLargeChunk(reduce)));
         }
 
@@ -96,14 +104,4 @@ impl NmpTransport for SerialTransport {
         let (response_header, response_body) = serial_transceive(&mut *self.port, &frame)?;
         Ok((request_header, response_header, response_body))
     }
-}
-
-pub fn open_transport(specs: &SerialSpecs) -> Result<Box<dyn NmpTransport>> {
-    let transport: Box<dyn NmpTransport> = if specs.device.starts_with("bt:") {
-        let id = specs.device[3..].to_string();
-        Box::new(BluetoothTransport::open(&id)?)
-    } else {
-        Box::new(SerialTransport::new(specs)?)
-    };
-    Ok(transport)
 }

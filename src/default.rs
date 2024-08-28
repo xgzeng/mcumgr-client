@@ -7,19 +7,15 @@ use serde_cbor;
 use serde_json;
 
 use crate::nmp_hdr::*;
-use crate::transfer::SerialSpecs;
-use crate::transport::{open_transport, transceive};
+use crate::transport::{transceive, NmpTransport};
 
-pub fn reset(specs: &SerialSpecs) -> Result<(), Error> {
+pub fn reset(transport: &mut dyn NmpTransport) -> Result<(), Error> {
     info!("send reset request");
-
-    // open serial port
-    let mut transport = open_transport(specs)?;
 
     // send request
     let body = Vec::<u8>::new();
     let (request_header, response_header, response_body) = transceive(
-        transport.as_mut(),
+        transport,
         NmpOp::Write,
         NmpGroup::Default,
         NmpIdDef::Reset,
