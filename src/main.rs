@@ -51,7 +51,7 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     bt: bool,
 
-    /// maximum size of ble characteristic
+    /// maximum size of BLE characteristic
     #[arg(short, long, default_value_t = 128)]
     chrc_mtu: usize,
 
@@ -110,8 +110,8 @@ enum Commands {
         slot: Option<u32>,
     },
 
-    /// scan and list bluetooth devices
-    Btscan,
+    /// scan and list BLE devices
+    Scan,
 }
 
 fn open_transport(cli: &Cli) -> Result<Box<dyn NmpTransport>> {
@@ -148,6 +148,11 @@ fn main() {
         ColorChoice::Auto,
     )
     .unwrap_or_else(|_| SimpleLogger::init(LevelFilter::Info, Default::default()).unwrap());
+
+    if let Commands::Scan = cli.command {
+        bt_scan().unwrap();
+        process::exit(1);
+    }
 
     // if no device is specified, try to auto detect it
     if cli.device.is_empty() {
@@ -271,7 +276,7 @@ fn main() {
             || -> Result<(), Error> { test(transport.as_mut(), hex::decode(hash)?, *confirm) }()
         }
         Commands::Erase { slot } => erase(transport.as_mut(), *slot),
-        Commands::Btscan => bt_scan(),
+        Commands::Scan => Ok(()),
     };
 
     // show error, if failed

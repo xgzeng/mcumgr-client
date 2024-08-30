@@ -136,9 +136,11 @@ async fn drain_stream<T>(stream: &mut Pin<Box<dyn Stream<Item = ValueNotificatio
 impl BluetoothTransport {
     async fn open_async(id_or_name: &str) -> Result<(Peripheral, NotificationStream)> {
         let peripheral = find_peripheral(id_or_name).await?;
+        info!("connecting to ble peripheral");
         peripheral.connect().await?;
-        peripheral.subscribe(NMP_TRANSPORT_CHRC).await?;
         info!("ble peripheral connected");
+        peripheral.subscribe(NMP_TRANSPORT_CHRC).await?;
+        info!("ble notification subscribed");
         let mut notification_stream = peripheral.notifications().await?;
         drain_stream::<ValueNotification>(&mut notification_stream).await;
         Ok((peripheral, notification_stream))
@@ -146,10 +148,13 @@ impl BluetoothTransport {
 
     pub fn new(specs: &BluetoothSpecs) -> Result<BluetoothTransport> {
         let runtime = Runtime::new()?;
-        let (peripheral, notification_stream) = runtime
-            .block_on(Self::open_async(&specs.device))
-            .context("open ble peripheral")?;
+        let (peripheral, notification_stream) =
+            runtime.block_on(Self::open_async(&specs.device))?;
 
+        info!(
+            "BLE transport mtu={} chrc_mtu={}",
+            specs.mtu, specs.chrc_mtu
+        );
         let transport = BluetoothTransport {
             runtime,
             peripheral,
