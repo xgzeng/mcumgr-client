@@ -9,6 +9,7 @@ use simplelog::{ColorChoice, Config, SimpleLogger, TermLogger, TerminalMode};
 use std::env;
 use std::path::PathBuf;
 use std::process;
+use std::time::Duration;
 
 use mcumgr_client::*;
 
@@ -79,6 +80,7 @@ impl From<&Cli> for BluetoothSpecs {
             device: cli.device.clone(),
             mtu: cli.mtu,
             chrc_mtu: cli.chrc_mtu,
+            timeout: Duration::from_secs(cli.initial_timeout_s as u64),
         }
     }
 }
@@ -125,7 +127,7 @@ fn open_transport(cli: &Cli) -> Result<Box<dyn NmpTransport>> {
     }
 }
 
-fn main() {
+fn main() -> Result<()> {
     // show program name, version and copyright
     let name = env!("CARGO_PKG_NAME");
     let version = env!("CARGO_PKG_VERSION");
@@ -150,15 +152,15 @@ fn main() {
     .unwrap_or_else(|_| SimpleLogger::init(LevelFilter::Info, Default::default()).unwrap());
 
     if let Commands::Scan = cli.command {
-        bt_scan().unwrap();
-        process::exit(1);
+        bt_scan()?;
+        return Ok(());
     }
 
     // if no device is specified, try to auto detect it
     if cli.device.is_empty() {
         if cli.bt {
             println!("device must be specified for bluetooth transport");
-            return;
+            process::exit(1);
         }
 
         let mut bootloaders = Vec::new();
@@ -233,7 +235,7 @@ fn main() {
     };
 
     // execute command
-    let result = match &cli.command {
+    match &cli.command {
         Commands::List => || -> Result<(), Error> {
             let v = list(transport.as_mut())?;
             print!("response: {}", serde_json::to_string_pretty(&v)?);
@@ -248,8 +250,8 @@ fn main() {
             .unwrap().progress_chars("=> "));
 
             let timeout_setting = (
-                std::time::Duration::from_secs(cli.initial_timeout_s as u64),
-                std::time::Duration::from_millis(cli.subsequent_timeout_ms as u64),
+                Duration::from_secs(cli.initial_timeout_s as u64),
+                Duration::from_millis(cli.subsequent_timeout_ms as u64),
             );
 
             upload(
@@ -277,11 +279,5 @@ fn main() {
         }
         Commands::Erase { slot } => erase(transport.as_mut(), *slot),
         Commands::Scan => Ok(()),
-    };
-
-    // show error, if failed
-    if let Err(e) = result {
-        error!("Error: {}", e);
-        process::exit(1);
     }
 }

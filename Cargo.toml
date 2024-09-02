@@ -35,7 +35,7 @@ serialport = { version = "4.2", default-features = false }
 sha2 = "0.10"
 simplelog = "0.12"
 
-btleplug = "0.11.5"
-tokio = { version = "1.39", features = ["rt-multi-thread"] }
+bluest = "0.6"
+tokio = { version = "1.39", features = ["rt-multi-thread", "time"] }
 futures = "0.3"
 uuid = { version = "1.8", features = ["v4", "serde"] }
