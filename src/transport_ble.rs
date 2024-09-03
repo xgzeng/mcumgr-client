@@ -5,8 +5,6 @@ use futures::stream::Stream;
 use futures::stream::StreamExt;
 use log::info;
 use std::collections::HashSet;
-use std::ops::Deref;
-use std::pin::Pin;
 use std::rc::Rc;
 use std::time::Duration;
 use tokio::runtime::Runtime;
@@ -30,37 +28,12 @@ pub struct BluetoothSpecs {
     pub timeout: Duration,
 }
 
-/// IMPORTANT! stream must be dropped before chrc
-/// WARN! if stream is moved out of this struct, safety is not guaranteed
-struct NotificationStream {
-    _stream: Box<dyn Stream<Item = bluest::Result<Vec<u8>>> + Unpin>,
-    _chrc: Pin<Box<Characteristic>>,
-}
-
-impl NotificationStream {
-    async fn new(chrc: Characteristic) -> Result<NotificationStream> {
-        let chrc = Box::pin(chrc);
-        // note: stream reference to chrc, and chrc is pinned, so stream is valid
-        let chrc_raw_ptr = chrc.deref() as *const Characteristic;
-        let chrc_raw = unsafe { &*chrc_raw_ptr };
-        let stream = Box::new(chrc_raw.notify().await?);
-        Ok(NotificationStream {
-            _stream: stream,
-            _chrc: chrc,
-        })
-    }
-
-    fn get_stream(&mut self) -> &mut (impl Stream<Item = bluest::Result<Vec<u8>>> + Unpin) {
-        &mut self._stream
-    }
-}
-
 pub struct BluetoothTransport {
     runtime: Rc<Runtime>,
-    adapter: Adapter,
-    device: Device,
+    _adapter: Adapter,
+    _device: Device,
     chrc: Characteristic,
-    response_stream: NotificationStream,
+    response_stream: Box<dyn Stream<Item = bluest::Result<Vec<u8>>> + Unpin>,
     mtu: usize,
     chrc_mtu: usize,
     seq_id: u8,
@@ -166,12 +139,12 @@ impl BluetoothTransport {
             specs.mtu, specs.chrc_mtu
         );
 
-        let response_stream = NotificationStream::new(chrc.clone()).await?;
+        let response_stream = Box::new(chrc.notify().await?);
 
         let transport = BluetoothTransport {
             runtime,
-            adapter,
-            device,
+            _adapter: adapter,
+            _device: device,
             chrc,
             response_stream,
             mtu: specs.mtu,
@@ -202,7 +175,6 @@ async fn read_response(
     notify_stream: &mut (impl Stream<Item = bluest::Result<Vec<u8>>> + Unpin),
     timeout: Duration,
 ) -> Result<Vec<u8>> {
-    // let mut notify_stream = chrc.notify().await?;
     let mut response: Vec<u8> = vec![];
     // wait for notifitcations
     loop {
@@ -261,8 +233,9 @@ impl NmpTransport for BluetoothTransport {
         }
 
         let rsp = self.runtime.block_on(async {
+            // self.chrc
             write_request(&self.chrc, &frame, self.chrc_mtu).await?;
-            read_response(self.response_stream.get_stream(), self.timeout).await
+            read_response(&mut self.response_stream, self.timeout).await
         })?;
 
         // parse header
