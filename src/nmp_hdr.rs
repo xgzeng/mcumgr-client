@@ -190,6 +190,8 @@ impl NmpHdr {
     }
 }
 
+pub const NMP_HDR_LEN: usize = 8;
+
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 pub struct NmpBase {
     pub hdr: NmpHdr,

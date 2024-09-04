@@ -1,22 +1,17 @@
 // Copyright © 2023-2024 Vouch.io LLC
 
-use anyhow::{bail, Context, Error, Result};
+use anyhow::{anyhow, bail, Context, Error, Result};
 use base64::{engine::general_purpose, Engine as _};
 use byteorder::{BigEndian, ByteOrder, WriteBytesExt};
 use crc16::*;
 use hex;
-use lazy_static::lazy_static;
 use log::debug;
-use rand::{thread_rng, Rng};
-use serde_cbor;
 use serialport::SerialPort;
 use std::cmp::min;
-use std::io::Cursor;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
-use crate::nmp_hdr::*;
-use crate::test_serial_port::TestSerialPort;
+//use crate::test_serial_port::TestSerialPort;
+use crate::transport::{ErrTooLargeChunk, SmpTransportImpl};
 
 pub struct SerialSpecs {
     pub device: String,
@@ -25,7 +20,7 @@ pub struct SerialSpecs {
     pub nb_retry: u32,
     pub linelength: usize,
     pub mtu: usize,
-    pub baudrate: u32
+    pub baudrate: u32,
 }
 
 fn read_byte(port: &mut dyn SerialPort) -> Result<u8, Error> {
@@ -43,39 +38,18 @@ fn expect_byte(port: &mut dyn SerialPort, b: u8) -> Result<(), Error> {
 }
 
 pub fn open_port(specs: &SerialSpecs) -> Result<Box<dyn SerialPort>, Error> {
-    if specs.device.to_lowercase() == "test" {
-        Ok(Box::new(TestSerialPort::new()))
-    } else {
-        serialport::new(&specs.device, specs.baudrate)
-            .timeout(Duration::from_secs(specs.initial_timeout_s as u64))
-            .open()
-            .with_context(|| format!("failed to open serial port {}", &specs.device))
-    }
+    // if specs.device.to_lowercase() == "test" {
+    //     Ok(Box::new(TestSerialPort::new()))
+    // } else {
+    serialport::new(&specs.device, specs.baudrate)
+        .timeout(Duration::from_secs(specs.initial_timeout_s as u64))
+        .open()
+        .with_context(|| format!("failed to open serial port {}", &specs.device))
+    // }
 }
 
-// thread-safe counter, initialized with a random value on first call
-pub fn next_seq_id() -> u8 {
-    lazy_static! {
-        static ref COUNTER: AtomicU8 = AtomicU8::new(thread_rng().gen::<u8>());
-    }
-    COUNTER.fetch_add(1, Ordering::SeqCst)
-}
-
-pub fn encode_request(
-    linelength: usize,
-    op: NmpOp,
-    group: NmpGroup,
-    id: impl NmpId,
-    body: &Vec<u8>,
-    seq_id: u8,
-) -> Result<(Vec<u8>, NmpHdr), Error> {
-    // create request
-    let mut request_header = NmpHdr::new_req(op, group, id);
-    request_header.seq = seq_id;
-    request_header.len = body.len() as u16;
-    debug!("request header: {:?}", request_header);
-    let mut serialized = request_header.serialize()?;
-    serialized.extend(body);
+pub fn encode_request(linelength: usize, req: &Vec<u8>) -> Result<Vec<u8>, Error> {
+    let mut serialized = req.clone();
     debug!("serialized: {}", hex::encode(&serialized));
 
     // calculate CRC16 of it and append to the request
@@ -114,13 +88,10 @@ pub fn encode_request(
         written += write_len;
     }
 
-    Ok((data, request_header))
+    Ok(data)
 }
 
-pub fn serial_transceive(
-    port: &mut dyn SerialPort,
-    data: &Vec<u8>,
-) -> Result<(NmpHdr, serde_cbor::Value), Error> {
+pub fn serial_transceive(port: &mut dyn SerialPort, data: &Vec<u8>) -> Result<Vec<u8>, Error> {
     // empty input buffer
     let to_read = port.bytes_to_read()?;
     for _ in 0..to_read {
@@ -189,40 +160,71 @@ pub fn serial_transceive(
         bail!("wrong checksum");
     }
 
-    // read header
-    let mut cursor = Cursor::new(&data);
-    let response_header = NmpHdr::deserialize(&mut cursor).unwrap();
-    debug!("response header: {:?}", response_header);
-
-    debug!("cbor: {}", hex::encode(&data[8..]));
-
-    // decode body in CBOR format
-    let body = serde_cbor::from_reader(cursor)?;
-
-    Ok((response_header, body))
+    Ok(data)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::next_seq_id;
-    use std::collections::HashSet;
+// #[cfg(test)]
+// mod tests {
+//     use std::collections::HashSet;
 
-    #[test]
-    fn test_next_seq_id() {
-        let mut ids = HashSet::new();
-        let initial_id = next_seq_id();
-        ids.insert(initial_id);
+//     #[test]
+//     fn test_next_seq_id() {
+//         let mut ids = HashSet::new();
+//         let initial_id = next_seq_id();
+//         ids.insert(initial_id);
 
-        for _ in 0..std::u8::MAX {
-            let id = next_seq_id();
-            assert!(ids.insert(id), "Duplicate ID: {}", id);
+//         for _ in 0..std::u8::MAX {
+//             let id = next_seq_id();
+//             assert!(ids.insert(id), "Duplicate ID: {}", id);
+//         }
+
+//         // Check wrapping behavior
+//         let wrapped_id = next_seq_id();
+//         assert_eq!(
+//             wrapped_id, initial_id,
+//             "Wrapped ID does not match initial ID"
+//         );
+//     }
+// }
+
+pub(crate) struct SerialTransport {
+    port: Box<dyn serialport::SerialPort>,
+    linelength: usize,
+    mtu: usize,
+}
+
+impl SerialTransport {
+    pub fn new(specs: &SerialSpecs) -> Result<SerialTransport> {
+        let port = open_port(specs)?;
+        Ok(SerialTransport {
+            port,
+            linelength: specs.linelength,
+            mtu: specs.mtu,
+        })
+    }
+}
+
+impl SmpTransportImpl for SerialTransport {
+    fn mtu(&self) -> usize {
+        self.mtu * 3 / 4
+    }
+
+    fn set_timeout(&mut self, timeout: std::time::Duration) -> Result<()> {
+        self.port.set_timeout(timeout)?;
+        Ok(())
+    }
+
+    fn transceive_raw(&mut self, req_frame: &Vec<u8>) -> Result<Vec<u8>> {
+        // encode into serial frame
+        let frame = encode_request(self.linelength, &req_frame)?;
+
+        if frame.len() > self.mtu {
+            // number of bytes to reduce is base64 encoded, calculate back the number of bytes
+            // and then reduce a bit more for base64 filling and rounding
+            let reduce = (frame.len() - self.mtu) * 3 / 4 + 3;
+            return Err(anyhow!(ErrTooLargeChunk(reduce)));
         }
 
-        // Check wrapping behavior
-        let wrapped_id = next_seq_id();
-        assert_eq!(
-            wrapped_id, initial_id,
-            "Wrapped ID does not match initial ID"
-        );
+        serial_transceive(&mut *self.port, &frame)
     }
 }

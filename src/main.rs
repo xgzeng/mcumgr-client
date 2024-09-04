@@ -116,14 +116,12 @@ enum Commands {
     Scan,
 }
 
-fn open_transport(cli: &Cli) -> Result<Box<dyn NmpTransport>> {
+fn open_transport(cli: &Cli) -> Result<SmpTransport> {
     if cli.bt {
         // use bluetooth transport
-        let specs = BluetoothSpecs::from(cli);
-        Ok(Box::new(BluetoothTransport::new(&specs)?))
+        SmpTransport::new_ble(&BluetoothSpecs::from(cli))
     } else {
-        let specs = SerialSpecs::from(cli);
-        Ok(Box::new(SerialTransport::new(&specs)?))
+        SmpTransport::new_serial(&SerialSpecs::from(cli))
     }
 }
 
@@ -237,11 +235,11 @@ fn main() -> Result<()> {
     // execute command
     match &cli.command {
         Commands::List => || -> Result<(), Error> {
-            let v = list(transport.as_mut())?;
+            let v = list(&mut transport)?;
             print!("response: {}", serde_json::to_string_pretty(&v)?);
             Ok(())
         }(),
-        Commands::Reset => reset(transport.as_mut()),
+        Commands::Reset => reset(&mut transport),
         Commands::Upload { filename, slot } => || -> Result<(), Error> {
             // create a progress bar
             let pb = ProgressBar::new(1 as u64);
@@ -255,7 +253,7 @@ fn main() -> Result<()> {
             );
 
             upload(
-                transport.as_mut(),
+                &mut transport,
                 filename,
                 *slot,
                 timeout_setting,
@@ -275,9 +273,9 @@ fn main() -> Result<()> {
             )
         }(),
         Commands::Test { hash, confirm } => {
-            || -> Result<(), Error> { test(transport.as_mut(), hex::decode(hash)?, *confirm) }()
+            || -> Result<(), Error> { test(&mut transport, hex::decode(hash)?, *confirm) }()
         }
-        Commands::Erase { slot } => erase(transport.as_mut(), *slot),
+        Commands::Erase { slot } => erase(&mut transport, *slot),
         Commands::Scan => Ok(()),
     }
 }

@@ -11,7 +11,7 @@ use tokio::runtime::Runtime;
 use uuid::Uuid;
 
 use crate::nmp_hdr::*;
-use crate::transport::{NmpTransport, TransportError};
+use crate::transport::{ErrTooLargeChunk, SmpTransportImpl};
 
 // NMP Service UUID
 const NMP_SERVICE_UUID: Uuid = uuid::uuid!("8D53DC1D-1DB7-4CD3-868B-8A527460AA84");
@@ -28,7 +28,7 @@ pub struct BluetoothSpecs {
     pub timeout: Duration,
 }
 
-pub struct BluetoothTransport {
+pub(crate) struct BluetoothTransport {
     runtime: Rc<Runtime>,
     _adapter: Adapter,
     _device: Device,
@@ -36,7 +36,6 @@ pub struct BluetoothTransport {
     response_stream: Box<dyn Stream<Item = bluest::Result<Vec<u8>>> + Unpin>,
     mtu: usize,
     chrc_mtu: usize,
-    seq_id: u8,
     timeout: Duration,
 }
 
@@ -99,15 +98,6 @@ pub fn bt_scan() -> Result<()> {
     Ok(())
 }
 
-// async fn drain_stream<T>(stream: &mut Pin<Box<dyn Stream<Item = ValueNotification> + Send>>) {
-//     // drain the notification stream
-//     loop {
-//         if let Err(_) = tokio::time::timeout(Duration::from_millis(100), stream.next()).await {
-//             break;
-//         }
-//     }
-// }
-
 async fn discover_chrc(
     device: &Device,
     service_uuid: Uuid,
@@ -149,7 +139,6 @@ impl BluetoothTransport {
             response_stream,
             mtu: specs.mtu,
             chrc_mtu: specs.chrc_mtu,
-            seq_id: rand::random::<u8>(),
             timeout: specs.timeout,
         };
         Ok(transport)
@@ -168,8 +157,6 @@ async fn write_request(chrc: &Characteristic, data: &Vec<u8>, chrc_mtu: usize) -
     }
     Ok(())
 }
-
-const NMP_HDR_LEN: usize = 8;
 
 async fn read_response(
     notify_stream: &mut (impl Stream<Item = bluest::Result<Vec<u8>>> + Unpin),
@@ -202,7 +189,7 @@ async fn read_response(
     Ok(response)
 }
 
-impl NmpTransport for BluetoothTransport {
+impl SmpTransportImpl for BluetoothTransport {
     fn mtu(&self) -> usize {
         self.mtu
     }
@@ -212,38 +199,17 @@ impl NmpTransport for BluetoothTransport {
         Ok(())
     }
 
-    fn transceive(
-        &mut self,
-        op: NmpOp,
-        group: NmpGroup,
-        id: u8,
-        body: &Vec<u8>, // cbor encoded message
-    ) -> Result<(NmpHdr, NmpHdr, serde_cbor::Value)> {
-        // encode into NMP frame
-        let mut request_header = NmpHdr::new_req(op, group, id);
-        request_header.seq = self.seq_id;
-        request_header.len = body.len() as u16;
-
-        let mut frame = request_header.serialize()?;
-        frame.extend(body);
-
-        if frame.len() > self.mtu {
-            let reduce = frame.len() - self.mtu;
-            return Err(anyhow!(TransportError::TooLargeChunk(reduce)));
+    fn transceive_raw(&mut self, req_frame: &Vec<u8>) -> Result<Vec<u8>> {
+        if req_frame.len() > self.mtu {
+            let reduce = req_frame.len() - self.mtu;
+            return Err(anyhow!(ErrTooLargeChunk(reduce)));
         }
 
         let rsp = self.runtime.block_on(async {
-            // self.chrc
-            write_request(&self.chrc, &frame, self.chrc_mtu).await?;
+            write_request(&self.chrc, &req_frame, self.chrc_mtu).await?;
             read_response(&mut self.response_stream, self.timeout).await
         })?;
 
-        // parse header
-        let mut cursor = std::io::Cursor::new(&rsp);
-        let response_header = NmpHdr::deserialize(&mut cursor)?;
-        // parse cbor body
-        let rsp_body = serde_cbor::from_reader(cursor)?;
-
-        Ok((request_header, response_header, rsp_body))
+        Ok(rsp)
     }
 }

@@ -1,68 +1,31 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use serde::ser;
 use std::fmt;
 
 use crate::nmp_hdr::*;
-use crate::transfer::*;
+use crate::transport_ble::{BluetoothSpecs, BluetoothTransport};
+use crate::transport_serial::{SerialSpecs, SerialTransport};
 
-// Transport Error
+// Error representing a chunk that is too large to be sent on the transport
 #[derive(Debug)]
-pub enum TransportError {
-    // encoded frame is larger than the MTU
-    // usize: the number of bytes that overflow
-    TooLargeChunk(usize),
-}
-
-impl fmt::Display for TransportError {
+pub struct ErrTooLargeChunk(pub usize);
+impl fmt::Display for ErrTooLargeChunk {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "too large chunk")
     }
 }
 
-pub trait NmpTransport {
-    // @body cbor encoded message
-    fn transceive(
-        &mut self,
-        op: NmpOp,
-        group: NmpGroup,
-        id: u8,
-        body_cbor: &Vec<u8>,
-    ) -> Result<(NmpHdr, NmpHdr, serde_cbor::Value)>;
+pub trait SmpTransportImpl {
+    // send SMP request frame bytes and receive response frame bytes
+    // @req_frame SMP frame bytes to send
+    // @return response SMP frame bytes
+    fn transceive_raw(&mut self, req_frame: &Vec<u8>) -> Result<Vec<u8>>;
 
+    // @return MTU of the transport
     fn mtu(&self) -> usize;
 
+    // timeout for waiting response
     fn set_timeout(&mut self, timeout: std::time::Duration) -> Result<()>;
-}
-
-pub fn transceive(
-    transport: &mut dyn NmpTransport,
-    op: NmpOp,
-    group: NmpGroup,
-    id: impl NmpId,
-    req: &impl ser::Serialize,
-) -> Result<(NmpHdr, NmpHdr, serde_cbor::Value)> {
-    // convert to bytes with CBOR
-    let body_cbor = serde_cbor::to_vec(req)?;
-    transport.transceive(op, group, id.to_u8(), &body_cbor)
-}
-
-pub struct SerialTransport {
-    port: Box<dyn serialport::SerialPort>,
-    linelength: usize,
-    mtu: usize,
-    seq_id: u8,
-}
-
-impl SerialTransport {
-    pub fn new(specs: &SerialSpecs) -> Result<SerialTransport> {
-        let port = open_port(specs)?;
-        Ok(SerialTransport {
-            port,
-            linelength: specs.linelength,
-            mtu: specs.mtu,
-            seq_id: rand::random::<u8>(),
-        })
-    }
 }
 
 impl NmpId for u8 {
@@ -71,37 +34,72 @@ impl NmpId for u8 {
     }
 }
 
-impl NmpTransport for SerialTransport {
-    fn mtu(&self) -> usize {
-        self.mtu * 3 / 4
+pub struct SmpTransport {
+    transport_impl: Box<dyn SmpTransportImpl>,
+    seq_id: u8,
+}
+
+impl SmpTransport {
+    fn new(transport_impl: Box<dyn SmpTransportImpl>) -> Self {
+        SmpTransport {
+            transport_impl,
+            seq_id: rand::random::<u8>(),
+        }
     }
 
-    fn set_timeout(&mut self, timeout: std::time::Duration) -> Result<()> {
-        self.port.set_timeout(timeout)?;
-        Ok(())
+    pub fn new_serial(specs: &SerialSpecs) -> Result<Self> {
+        Ok(Self::new(Box::new(SerialTransport::new(specs)?)))
     }
 
-    fn transceive(
+    pub fn new_ble(specs: &BluetoothSpecs) -> Result<Self> {
+        Ok(Self::new(Box::new(BluetoothTransport::new(specs)?)))
+    }
+
+    pub fn transceive(
         &mut self,
         op: NmpOp,
         group: NmpGroup,
-        id: u8,
-        body: &Vec<u8>,
+        id: impl NmpId,
+        req: &impl ser::Serialize,
     ) -> Result<(NmpHdr, NmpHdr, serde_cbor::Value)> {
-        // encode into serial frame
-        let (frame, request_header) =
-            encode_request(self.linelength, op, group, id, &body, self.seq_id)?;
+        // cbor serialize request
+        let req_body = serde_cbor::to_vec(req)?;
+        // encode into NMP frame
+        let mut req_header = NmpHdr::new_req(op, group, id);
+        req_header.seq = self.seq_id;
+        req_header.len = req_body.len() as u16;
 
-        if frame.len() > self.mtu {
-            // number of bytes to reduce is base64 encoded, calculate back the number of bytes
-            // and then reduce a bit more for base64 filling and rounding
-            let reduce = (frame.len() - self.mtu) * 3 / 4 + 3;
-            return Err(anyhow!(TransportError::TooLargeChunk(reduce)));
-        }
+        let mut req_frame = req_header.serialize()?;
+        req_frame.extend(req_body);
 
-        self.seq_id = self.seq_id.wrapping_add(1);
+        let rsp = match self.transport_impl.transceive_raw(&req_frame) {
+            Err(e) if e.is::<ErrTooLargeChunk>() => {
+                // don't increment seq_id if chunk is too large
+                // because the request is never sent
+                return Err(e);
+            }
+            Err(e) => {
+                self.seq_id = self.seq_id.wrapping_add(1);
+                return Err(e.into());
+            }
+            Ok(rsp) => {
+                self.seq_id = self.seq_id.wrapping_add(1);
+                rsp
+            }
+        };
 
-        let (response_header, response_body) = serial_transceive(&mut *self.port, &frame)?;
-        Ok((request_header, response_header, response_body))
+        // parse response header and body
+        let mut cursor = std::io::Cursor::new(&rsp);
+        let rsp_header = NmpHdr::deserialize(&mut cursor)?;
+        let rsp_body = serde_cbor::from_reader(cursor)?;
+        Ok((req_header, rsp_header, rsp_body))
+    }
+
+    pub fn mtu(&self) -> usize {
+        self.transport_impl.mtu()
+    }
+
+    pub fn set_timeout(&mut self, timeout: std::time::Duration) -> Result<()> {
+        self.transport_impl.set_timeout(timeout)
     }
 }

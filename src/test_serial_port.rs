@@ -16,7 +16,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::nmp_hdr::*;
-use crate::transfer::encode_request;
+use crate::transport_serial::encode_request;
 
 pub struct TestSerialPort {
     data: Vec<u8>,

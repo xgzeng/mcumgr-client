@@ -12,7 +12,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::nmp_hdr::*;
-use crate::transport::{transceive, NmpTransport, TransportError};
+use crate::transport::{ErrTooLargeChunk, SmpTransport};
 
 fn get_rc(response_body: &serde_cbor::Value) -> Option<u32> {
     let mut rc: Option<u32> = None;
@@ -53,18 +53,13 @@ fn check_answer(request_header: &NmpHdr, response_header: &NmpHdr) -> bool {
     true
 }
 
-pub fn erase(transport: &mut dyn NmpTransport, slot: Option<u32>) -> Result<(), Error> {
+pub fn erase(transport: &mut SmpTransport, slot: Option<u32>) -> Result<(), Error> {
     info!("erase request");
 
     let req = ImageEraseReq { slot: slot };
     // send request
-    let (request_header, response_header, response_body) = transceive(
-        transport,
-        NmpOp::Write,
-        NmpGroup::Image,
-        NmpIdImage::Erase,
-        &req,
-    )?;
+    let (request_header, response_header, response_body) =
+        transport.transceive(NmpOp::Write, NmpGroup::Image, NmpIdImage::Erase, &req)?;
 
     if !check_answer(&request_header, &response_header) {
         bail!("wrong answer types")
@@ -81,7 +76,7 @@ pub fn erase(transport: &mut dyn NmpTransport, slot: Option<u32>) -> Result<(), 
 }
 
 pub fn test(
-    transport: &mut dyn NmpTransport,
+    transport: &mut SmpTransport,
     hash: Vec<u8>,
     confirm: Option<bool>,
 ) -> Result<(), Error> {
@@ -92,13 +87,8 @@ pub fn test(
         confirm: confirm,
     };
     // send request
-    let (request_header, response_header, response_body) = transceive(
-        transport,
-        NmpOp::Write,
-        NmpGroup::Image,
-        NmpIdImage::State,
-        &req,
-    )?;
+    let (request_header, response_header, response_body) =
+        transport.transceive(NmpOp::Write, NmpGroup::Image, NmpIdImage::State, &req)?;
 
     if !check_answer(&request_header, &response_header) {
         bail!("wrong answer types")
@@ -114,19 +104,14 @@ pub fn test(
     Ok(())
 }
 
-pub fn list(transport: &mut dyn NmpTransport) -> Result<ImageStateRsp, Error> {
+pub fn list(transport: &mut SmpTransport) -> Result<ImageStateRsp, Error> {
     info!("send image list request");
 
     // send request
     let req = std::collections::BTreeMap::<String, String>::new();
 
-    let (request_header, response_header, response_body) = transceive(
-        transport,
-        NmpOp::Read,
-        NmpGroup::Image,
-        NmpIdImage::State,
-        &req,
-    )?;
+    let (request_header, response_header, response_body) =
+        transport.transceive(NmpOp::Read, NmpGroup::Image, NmpIdImage::State, &req)?;
 
     if !check_answer(&request_header, &response_header) {
         bail!("wrong answer types")
@@ -139,7 +124,7 @@ pub fn list(transport: &mut dyn NmpTransport) -> Result<ImageStateRsp, Error> {
 }
 
 pub fn upload<F>(
-    transport: &mut dyn NmpTransport,
+    transport: &mut SmpTransport,
     filename: &PathBuf,
     slot: u8,
     timeout: (Duration, Duration), // initial and subsequent timeout
@@ -210,41 +195,34 @@ where
 
             // send request
             sent_blocks += 1;
-            let (request_header, response_header, response_body) = match transceive(
-                transport,
-                NmpOp::Write,
-                NmpGroup::Image,
-                NmpIdImage::Upload,
-                &req,
-            ) {
-                Ok(ret) => ret,
-                Err(e) if e.to_string() == "Operation timed out" => {
-                    if nb_retry == 0 {
+            let (request_header, response_header, response_body) =
+                match transport.transceive(NmpOp::Write, NmpGroup::Image, NmpIdImage::Upload, &req)
+                {
+                    Ok(ret) => ret,
+                    Err(e) if e.to_string() == "Operation timed out" => {
+                        if nb_retry == 0 {
+                            return Err(e);
+                        }
+                        nb_retry -= 1;
+                        sent_blocks -= 1;
+                        debug!("missed answer, nb_retry: {}", nb_retry);
+                        continue;
+                    }
+                    Err(e) if e.is::<ErrTooLargeChunk>() => {
+                        let reduce = e.downcast::<ErrTooLargeChunk>().unwrap().0;
+                        if reduce >= try_length {
+                            bail!("MTU too small");
+                        }
+
+                        try_length -= reduce;
+                        debug!("new try_length: {}", try_length);
+                        sent_blocks -= 1;
+                        continue;
+                    }
+                    Err(e) => {
                         return Err(e);
                     }
-                    nb_retry -= 1;
-                    sent_blocks -= 1;
-                    debug!("missed answer, nb_retry: {}", nb_retry);
-                    continue;
-                }
-                Err(e) if e.is::<TransportError>() => {
-                    match e.downcast::<TransportError>().unwrap() {
-                        TransportError::TooLargeChunk(reduce) => {
-                            if reduce >= try_length {
-                                bail!("MTU too small");
-                            }
-
-                            try_length -= reduce;
-                            debug!("new try_length: {}", try_length);
-                            sent_blocks -= 1;
-                            continue;
-                        }
-                    }
-                }
-                Err(e) => {
-                    return Err(e);
-                }
-            };
+                };
 
             if !check_answer(&request_header, &response_header) {
                 bail!("wrong answer types")

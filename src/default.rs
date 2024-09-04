@@ -7,20 +7,15 @@ use serde_cbor;
 use serde_json;
 
 use crate::nmp_hdr::*;
-use crate::transport::{transceive, NmpTransport};
+use crate::transport::SmpTransport;
 
-pub fn reset(transport: &mut dyn NmpTransport) -> Result<(), Error> {
+pub fn reset(transport: &mut SmpTransport) -> Result<(), Error> {
     info!("send reset request");
 
     // send request
     let body = Vec::<u8>::new();
-    let (request_header, response_header, response_body) = transceive(
-        transport,
-        NmpOp::Write,
-        NmpGroup::Default,
-        NmpIdDef::Reset,
-        &body,
-    )?;
+    let (request_header, response_header, response_body) =
+        transport.transceive(NmpOp::Write, NmpGroup::Default, NmpIdDef::Reset, &body)?;
 
     // verify sequence id
     if response_header.seq != request_header.seq {
